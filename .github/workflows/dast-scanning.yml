@@ -1,7 +1,7 @@
 name: DAST Scan with OWASP ZAP
 
 on:
-  workflow_dispatch:  # Только ручной запуск для безопасности
+  workflow_dispatch:
 
 jobs:
   deploy-and-scan:
@@ -9,78 +9,76 @@ jobs:
     timeout-minutes: 60
     
     steps:
-      # Шаг 1: Получение кода Zabbix Docker
+      # Шаг 1: Получение кода Zabbix Docker (исправленная версия)
       - name: Checkout zabbix-docker repository
         uses: actions/checkout@v4
         with:
           repository: zabbix/zabbix-docker
-          ref: latest
+          # Используем существующую ветку
+          ref: main  # или 'master', в зависимости от репозитория
       
-      # Шаг 2: Запуск Zabbix в Docker
+      # Шаг 2: Запуск Zabbix в Docker (простая версия)
       - name: Start Zabbix stack
         run: |
-          # Простой docker-compose для тестирования
-          cat > docker-compose.test.yml << 'EOF'
-          version: '3.5'
-          services:
-            mysql-server:
-              image: mysql:8.0
-              environment:
-                MYSQL_DATABASE: zabbix
-                MYSQL_USER: zabbix
-                MYSQL_PASSWORD: zabbix
-                MYSQL_ROOT_PASSWORD: zabbix
-              healthcheck:
-                test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-                timeout: 5s
-                retries: 10
-
-            zabbix-server:
-              image: zabbix/zabbix-server-mysql:6.4-latest
-              ports:
-                - "10051:10051"
-              environment:
-                DB_SERVER_HOST: mysql-server
-                MYSQL_USER: zabbix
-                MYSQL_PASSWORD: zabbix
-                MYSQL_DATABASE: zabbix
-              depends_on:
-                mysql-server:
-                  condition: service_healthy
-
-            zabbix-web:
-              image: zabbix/zabbix-web-nginx-mysql:6.4-latest
-              ports:
-                - "8080:8080"
-              environment:
-                ZBX_SERVER_HOST: zabbix-server
-                DB_SERVER_HOST: mysql-server
-                MYSQL_USER: zabbix
-                MYSQL_PASSWORD: zabbix
-                MYSQL_DATABASE: zabbix
-              depends_on:
-                - mysql-server
-                - zabbix-server
-          EOF
+          # Создаем простую конфигурацию для тестирования
+          echo "Creating test Zabbix environment..."
           
-          # Запуск контейнеров
-          docker-compose -f docker-compose.test.yml up -d
+          # Используем docker run вместо docker-compose для простоты
+          # Запускаем MySQL
+          docker run -d --name zabbix-mysql-test \
+            -e MYSQL_DATABASE=zabbix \
+            -e MYSQL_USER=zabbix \
+            -e MYSQL_PASSWORD=zabbix \
+            -e MYSQL_ROOT_PASSWORD=zabbix \
+            mysql:8.0 \
+            --character-set-server=utf8mb4 \
+            --collation-server=utf8mb4_bin
           
-          # Ожидание готовности веб-интерфейса
-          echo "Waiting for Zabbix to start..."
-          for i in {1..30}; do
-            if curl -s -f http://localhost:8080 > /dev/null; then
-              echo "Zabbix is ready!"
-              break
-            fi
-            echo "Attempt $i/30 - waiting..."
-            sleep 5
-          done
+          sleep 10
+          
+          # Запускаем Zabbix server
+          docker run -d --name zabbix-server-test \
+            --link zabbix-mysql-test:mysql \
+            -e DB_SERVER_HOST=zabbix-mysql-test \
+            -e MYSQL_USER=zabbix \
+            -e MYSQL_PASSWORD=zabbix \
+            -e MYSQL_DATABASE=zabbix \
+            -p 10051:10051 \
+            zabbix/zabbix-server-mysql:latest
+          
+          sleep 10
+          
+          # Запускаем Zabbix web
+          docker run -d --name zabbix-web-test \
+            --link zabbix-mysql-test:mysql \
+            --link zabbix-server-test:zabbix-server \
+            -e ZBX_SERVER_HOST=zabbix-server-test \
+            -e DB_SERVER_HOST=zabbix-mysql-test \
+            -e MYSQL_USER=zabbix \
+            -e MYSQL_PASSWORD=zabbix \
+            -e MYSQL_DATABASE=zabbix \
+            -p 8080:8080 \
+            zabbix/zabbix-web-nginx-mysql:latest
+          
+          # Ждем запуска сервисов
+          echo "Waiting for Zabbix to start (60 seconds)..."
+          sleep 60
+          
+          # Проверяем доступность
+          if curl -s -f http://localhost:8080 > /dev/null; then
+            echo "✓ Zabbix is ready at http://localhost:8080"
+          else
+            echo "⚠ Zabbix might not be fully ready, but continuing with scan..."
+          fi
       
       # Шаг 3: Запуск OWASP ZAP Full Scan
       - name: Run OWASP ZAP Full Scan
         run: |
-          # Запуск полного сканирования ZAP с дефолтным HTML отчетом
+          echo "Starting OWASP ZAP Full Scan..."
+          echo "Target: http://localhost:8080"
+          echo "This will take approximately 30 minutes..."
+          
+          # Запускаем ZAP сканирование
           docker run --network host --rm \
             -v $(pwd):/zap/wrk:rw \
             -t ghcr.io/zaproxy/zaproxy:stable \
@@ -89,16 +87,17 @@ jobs:
             -r zap-report.html \
             -w zap-report.md \
             -m 30 \
-            -a
+            -a \
+            -I
           
-          # Проверка наличия отчета
+          # Проверяем результат
           if [ -f "zap-report.html" ]; then
-            echo "ZAP report generated successfully"
-            ls -la zap-report.*
+            echo "✅ ZAP report generated: zap-report.html"
+            echo "Report size: $(wc -l < zap-report.html) lines"
           else
-            echo "Warning: ZAP report not found"
+            echo "❌ ZAP report not generated"
+            exit 1
           fi
-        continue-on-error: true  # Продолжить даже при найденных уязвимостях
       
       # Шаг 4: Загрузка отчета как артефакта
       - name: Upload ZAP Report
@@ -113,5 +112,8 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          docker-compose -f docker-compose.test.yml down -v 2>/dev/null || true
+          echo "Cleaning up Docker containers..."
+          docker stop zabbix-web-test zabbix-server-test zabbix-mysql-test 2>/dev/null || true
+          docker rm zabbix-web-test zabbix-server-test zabbix-mysql-test 2>/dev/null || true
           docker system prune -af 2>/dev/null || true
+          echo "Cleanup completed"
