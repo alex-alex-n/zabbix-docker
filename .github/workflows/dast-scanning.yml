@@ -5,7 +5,7 @@ on:
   pull_request:
     branches: [ master, main ]
   schedule:
-    - cron: "0 2 * * 0"  # раз в неделю
+    - cron: "0 2 * * 0"  # еженедельно
 
 permissions:
   contents: read
@@ -13,83 +13,89 @@ permissions:
 jobs:
   dast-zap:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1) Поднимаем стенд Zabbix из docker-compose
-      # В репозитории zabbix-docker есть разные compose-файлы/варианты.
-      # Ниже — пример с использованием docker compose.
+      - name: Select compose file
+        id: compose
+        shell: bash
+        run: |
+          set -e
+
+          # 1) приоритет: compose.yaml (в репозитории он есть и указывает на нужный файл)
+          if [ -f "compose.yaml" ]; then
+            echo "file=compose.yaml" >> "$GITHUB_OUTPUT"
+            echo "Selected compose: compose.yaml"
+            exit 0
+          fi
+
+          # 2) запасной вариант: любой latest compose
+          f=$(ls -1 docker-compose_v3_*latest*.yaml 2>/dev/null | head -n 1 || true)
+          if [ -n "$f" ]; then
+            echo "file=$f" >> "$GITHUB_OUTPUT"
+            echo "Selected compose: $f"
+            exit 0
+          fi
+
+          echo "No compose file found"
+          ls -la
+          exit 1
+
       - name: Start Zabbix stack (docker compose)
         run: |
           docker --version
           docker compose version
 
-          # Пример: используем compose из репозитория.
-          # ВАЖНО: путь/имя compose-файла может отличаться в вашей ветке.
-          # Подставьте реальный файл (например, docker-compose_v3_*.yaml).
-          COMPOSE_FILE="docker-compose.yaml"
+          docker compose -f "${{ steps.compose.outputs.file }}" up -d
 
-          if [ ! -f "$COMPOSE_FILE" ]; then
-            echo "Compose file $COMPOSE_FILE not found. List repo files:"
-            ls -la
-            exit 1
-          fi
+          docker ps
 
-          docker compose -f "$COMPOSE_FILE" up -d
-
-      # 2) Дожидаемся готовности web UI
       - name: Wait for Zabbix web UI
+        shell: bash
         run: |
           set -e
-          URL="http://localhost"
-          # Часто Zabbix web доступен на 80 порту через web-nginx/apache контейнер.
-          # Если у вас проброшен другой порт (например 8080), поменяйте URL:
-          # URL="http://localhost:8080"
+
+          # В большинстве compose в zabbix-docker фронтенд публикуется на 80 порту.
+          # Если у вас другой порт — измените URL.
+          URL="http://localhost/"
 
           echo "Waiting for $URL ..."
-          for i in {1..60}; do
+          for i in {1..90}; do
             code=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
+
+            # 200 OK или 302 Redirect (например на /zabbix или страницу логина) — считаем, что веб поднялся
             if [ "$code" = "200" ] || [ "$code" = "302" ]; then
               echo "Web UI is up (HTTP $code)"
               exit 0
             fi
+
             sleep 5
           done
 
           echo "Zabbix UI did not become ready in time"
           docker ps
-          docker compose logs --no-color | tail -200
+          docker compose -f "${{ steps.compose.outputs.file }}" logs --no-color | tail -200
           exit 1
 
-      # 3) DAST: OWASP ZAP baseline scan (пассивный)
+      # Пассивный DAST (baseline): безопасно для CI
       - name: OWASP ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.12.0
         with:
           target: "http://localhost/"
-          # Отчёты:
           report_html: "zap-baseline-report.html"
           report_json: "zap-baseline-report.json"
-          # Правила/исключения при необходимости:
-          # rules_file_name: ".zap/rules.tsv"
-          # Исключения URL (например, logout, тяжелые эндпоинты):
-          # exclude: ".*logout.*"
-
-          # Важно для ВКР: baseline не должен валить pipeline на первых этапах внедрения
-          # Можно включить "мягкий" режим:
           fail_action: false
 
-      # 4) Сбор логов контейнеров (полезно для доказательной базы в ВКР)
-      - name: Collect docker logs (optional)
+      - name: Collect docker logs
         if: always()
         run: |
           mkdir -p artifacts
           docker ps > artifacts/docker-ps.txt
-          docker compose logs --no-color > artifacts/docker-compose.log || true
+          docker compose -f "${{ steps.compose.outputs.file }}" logs --no-color > artifacts/docker-compose.log || true
 
-      # 5) Выгрузка артефактов
       - name: Upload DAST artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -101,8 +107,7 @@ jobs:
             artifacts/docker-ps.txt
             artifacts/docker-compose.log
 
-      # 6) Остановка стенда
       - name: Shutdown stack
         if: always()
         run: |
-          docker compose down -v || true
+          docker compose -f "${{ steps.compose.outputs.file }}" down -v || true
