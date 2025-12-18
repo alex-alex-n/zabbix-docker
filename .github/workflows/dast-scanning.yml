@@ -1,4 +1,4 @@
-name: DAST Security Scanning for Zabbix Docker
+name: DAST Security Scanning for Zabbix Docker2
 
 on:
   push:
