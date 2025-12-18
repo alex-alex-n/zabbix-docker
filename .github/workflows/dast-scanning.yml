@@ -64,14 +64,29 @@ jobs:
           docker compose -f "${{ steps.compose.outputs.file }}" logs --no-color | tail -200
           exit 1
 
+      # Починка прав, чтобы контейнер ZAP мог писать в /zap/wrk (смонтированная папка репозитория)
+      - name: Fix workspace permissions for ZAP container
+        shell: bash
+        run: |
+          sudo chmod -R a+rwx "${GITHUB_WORKSPACE}"
+
       - name: OWASP ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.12.0
         with:
           target: "http://localhost/"
           report_html: "zap-baseline-report.html"
           report_json: "zap-baseline-report.json"
+          report_md: "zap-baseline-report.md"
           fail_action: false
+
+          # ключевое: не пытаться создавать GitHub Issues
           allow_issue_writing: false
+
+          # ключевое: имя артефакта без underscore (иначе у вас падает на zap_scan)
+          artifact_name: "zap-scan"
+
+          # если поддерживается этой версией — отключит встроенную загрузку артефактов
+          upload_artifacts: false
 
       - name: Collect docker logs
         if: always()
@@ -81,14 +96,16 @@ jobs:
           docker ps > artifacts/docker-ps.txt
           docker compose -f "${{ steps.compose.outputs.file }}" logs --no-color > artifacts/docker-compose.log || true
 
+      # Загружаем отчёты и логи САМИ, нормальным способом
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: zap-scan
+          name: zap-scan-results
           path: |
             zap-baseline-report.html
             zap-baseline-report.json
+            zap-baseline-report.md
             artifacts/docker-ps.txt
             artifacts/docker-compose.log
 
