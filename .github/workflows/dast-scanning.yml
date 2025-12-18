@@ -4,11 +4,15 @@ on:
   workflow_dispatch:
   pull_request:
     branches: [ master, main ]
+  push:
+    branches: [ master, main, develop ]
   schedule:
-    - cron: "0 2 * * 0"  # еженедельно
+    - cron: "0 2 * * 0" # еженедельно
 
 permissions:
   contents: read
+  # Важно: issues:write НЕ даём, чтобы action не пыталась создавать Issue.
+  # Это устраняет ошибку "Resource not accessible by integration".
 
 jobs:
   dast-zap:
@@ -25,14 +29,14 @@ jobs:
         run: |
           set -e
 
-          # 1) приоритет: compose.yaml (в репозитории он есть и указывает на нужный файл)
+          # В репозитории есть compose.yaml (symlink на docker-compose_v3_*.yaml)
           if [ -f "compose.yaml" ]; then
             echo "file=compose.yaml" >> "$GITHUB_OUTPUT"
             echo "Selected compose: compose.yaml"
             exit 0
           fi
 
-          # 2) запасной вариант: любой latest compose
+          # Запасной вариант: любой compose latest
           f=$(ls -1 docker-compose_v3_*latest*.yaml 2>/dev/null | head -n 1 || true)
           if [ -n "$f" ]; then
             echo "file=$f" >> "$GITHUB_OUTPUT"
@@ -45,12 +49,12 @@ jobs:
           exit 1
 
       - name: Start Zabbix stack (docker compose)
+        shell: bash
         run: |
           docker --version
           docker compose version
 
           docker compose -f "${{ steps.compose.outputs.file }}" up -d
-
           docker ps
 
       - name: Wait for Zabbix web UI
@@ -58,20 +62,17 @@ jobs:
         run: |
           set -e
 
-          # В большинстве compose в zabbix-docker фронтенд публикуется на 80 порту.
-          # Если у вас другой порт — измените URL.
+          # Обычно web UI доступен на 80 порту.
+          # Если в вашем compose проброшен другой порт (например 8080) — поменяйте URL.
           URL="http://localhost/"
 
           echo "Waiting for $URL ..."
           for i in {1..90}; do
             code=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
-
-            # 200 OK или 302 Redirect (например на /zabbix или страницу логина) — считаем, что веб поднялся
             if [ "$code" = "200" ] || [ "$code" = "302" ]; then
               echo "Web UI is up (HTTP $code)"
               exit 0
             fi
-
             sleep 5
           done
 
@@ -80,17 +81,22 @@ jobs:
           docker compose -f "${{ steps.compose.outputs.file }}" logs --no-color | tail -200
           exit 1
 
-      # Пассивный DAST (baseline): безопасно для CI
-      - name: OWASP ZAP Baseline Scan
+      - name: OWASP ZAP Baseline Scan (DAST)
         uses: zaproxy/action-baseline@v0.12.0
         with:
           target: "http://localhost/"
           report_html: "zap-baseline-report.html"
           report_json: "zap-baseline-report.json"
+
+          # Не валим пайплайн (удобно для ВКР/первичного внедрения)
           fail_action: false
+
+          # Ключевое исправление: запретить попытки создавать Issue/комментарии
+          allow_issue_writing: false
 
       - name: Collect docker logs
         if: always()
+        shell: bash
         run: |
           mkdir -p artifacts
           docker ps > artifacts/docker-ps.txt
@@ -109,5 +115,6 @@ jobs:
 
       - name: Shutdown stack
         if: always()
+        shell: bash
         run: |
           docker compose -f "${{ steps.compose.outputs.file }}" down -v || true
