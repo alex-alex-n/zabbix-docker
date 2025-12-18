@@ -1,119 +1,108 @@
-name: DAST Scan with OWASP ZAP
+name: DAST - OWASP ZAP (Zabbix Docker)
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [ master, main ]
+  schedule:
+    - cron: "0 2 * * 0"  # раз в неделю
+
+permissions:
+  contents: read
 
 jobs:
-  deploy-and-scan:
+  dast-zap:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    
+    timeout-minutes: 30
+
     steps:
-      # Шаг 1: Получение кода Zabbix Docker (исправленная версия)
-      - name: Checkout zabbix-docker repository
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          repository: zabbix/zabbix-docker
-          # Используем существующую ветку
-          ref: main  # или 'master', в зависимости от репозитория
-      
-      # Шаг 2: Запуск Zabbix в Docker (простая версия)
-      - name: Start Zabbix stack
+
+      # 1) Поднимаем стенд Zabbix из docker-compose
+      # В репозитории zabbix-docker есть разные compose-файлы/варианты.
+      # Ниже — пример с использованием docker compose.
+      - name: Start Zabbix stack (docker compose)
         run: |
-          # Создаем простую конфигурацию для тестирования
-          echo "Creating test Zabbix environment..."
-          
-          # Используем docker run вместо docker-compose для простоты
-          # Запускаем MySQL
-          docker run -d --name zabbix-mysql-test \
-            -e MYSQL_DATABASE=zabbix \
-            -e MYSQL_USER=zabbix \
-            -e MYSQL_PASSWORD=zabbix \
-            -e MYSQL_ROOT_PASSWORD=zabbix \
-            mysql:8.0 \
-            --character-set-server=utf8mb4 \
-            --collation-server=utf8mb4_bin
-          
-          sleep 10
-          
-          # Запускаем Zabbix server
-          docker run -d --name zabbix-server-test \
-            --link zabbix-mysql-test:mysql \
-            -e DB_SERVER_HOST=zabbix-mysql-test \
-            -e MYSQL_USER=zabbix \
-            -e MYSQL_PASSWORD=zabbix \
-            -e MYSQL_DATABASE=zabbix \
-            -p 10051:10051 \
-            zabbix/zabbix-server-mysql:latest
-          
-          sleep 10
-          
-          # Запускаем Zabbix web
-          docker run -d --name zabbix-web-test \
-            --link zabbix-mysql-test:mysql \
-            --link zabbix-server-test:zabbix-server \
-            -e ZBX_SERVER_HOST=zabbix-server-test \
-            -e DB_SERVER_HOST=zabbix-mysql-test \
-            -e MYSQL_USER=zabbix \
-            -e MYSQL_PASSWORD=zabbix \
-            -e MYSQL_DATABASE=zabbix \
-            -p 8080:8080 \
-            zabbix/zabbix-web-nginx-mysql:latest
-          
-          # Ждем запуска сервисов
-          echo "Waiting for Zabbix to start (60 seconds)..."
-          sleep 60
-          
-          # Проверяем доступность
-          if curl -s -f http://localhost:8080 > /dev/null; then
-            echo "✓ Zabbix is ready at http://localhost:8080"
-          else
-            echo "⚠ Zabbix might not be fully ready, but continuing with scan..."
-          fi
-      
-      # Шаг 3: Запуск OWASP ZAP Full Scan
-      - name: Run OWASP ZAP Full Scan
-        run: |
-          echo "Starting OWASP ZAP Full Scan..."
-          echo "Target: http://localhost:8080"
-          echo "This will take approximately 30 minutes..."
-          
-          # Запускаем ZAP сканирование
-          docker run --network host --rm \
-            -v $(pwd):/zap/wrk:rw \
-            -t ghcr.io/zaproxy/zaproxy:stable \
-            zap-full-scan.py \
-            -t http://localhost:8080 \
-            -r zap-report.html \
-            -w zap-report.md \
-            -m 30 \
-            -a \
-            -I
-          
-          # Проверяем результат
-          if [ -f "zap-report.html" ]; then
-            echo "✅ ZAP report generated: zap-report.html"
-            echo "Report size: $(wc -l < zap-report.html) lines"
-          else
-            echo "❌ ZAP report not generated"
+          docker --version
+          docker compose version
+
+          # Пример: используем compose из репозитория.
+          # ВАЖНО: путь/имя compose-файла может отличаться в вашей ветке.
+          # Подставьте реальный файл (например, docker-compose_v3_*.yaml).
+          COMPOSE_FILE="docker-compose.yaml"
+
+          if [ ! -f "$COMPOSE_FILE" ]; then
+            echo "Compose file $COMPOSE_FILE not found. List repo files:"
+            ls -la
             exit 1
           fi
-      
-      # Шаг 4: Загрузка отчета как артефакта
-      - name: Upload ZAP Report
-        uses: actions/upload-artifact@v4
+
+          docker compose -f "$COMPOSE_FILE" up -d
+
+      # 2) Дожидаемся готовности web UI
+      - name: Wait for Zabbix web UI
+        run: |
+          set -e
+          URL="http://localhost"
+          # Часто Zabbix web доступен на 80 порту через web-nginx/apache контейнер.
+          # Если у вас проброшен другой порт (например 8080), поменяйте URL:
+          # URL="http://localhost:8080"
+
+          echo "Waiting for $URL ..."
+          for i in {1..60}; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
+            if [ "$code" = "200" ] || [ "$code" = "302" ]; then
+              echo "Web UI is up (HTTP $code)"
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "Zabbix UI did not become ready in time"
+          docker ps
+          docker compose logs --no-color | tail -200
+          exit 1
+
+      # 3) DAST: OWASP ZAP baseline scan (пассивный)
+      - name: OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
         with:
-          name: zap-dast-report
-          path: |
-            zap-report.html
-            zap-report.md
-      
-      # Шаг 5: Очистка контейнеров
-      - name: Cleanup
+          target: "http://localhost/"
+          # Отчёты:
+          report_html: "zap-baseline-report.html"
+          report_json: "zap-baseline-report.json"
+          # Правила/исключения при необходимости:
+          # rules_file_name: ".zap/rules.tsv"
+          # Исключения URL (например, logout, тяжелые эндпоинты):
+          # exclude: ".*logout.*"
+
+          # Важно для ВКР: baseline не должен валить pipeline на первых этапах внедрения
+          # Можно включить "мягкий" режим:
+          fail_action: false
+
+      # 4) Сбор логов контейнеров (полезно для доказательной базы в ВКР)
+      - name: Collect docker logs (optional)
         if: always()
         run: |
-          echo "Cleaning up Docker containers..."
-          docker stop zabbix-web-test zabbix-server-test zabbix-mysql-test 2>/dev/null || true
-          docker rm zabbix-web-test zabbix-server-test zabbix-mysql-test 2>/dev/null || true
-          docker system prune -af 2>/dev/null || true
-          echo "Cleanup completed"
+          mkdir -p artifacts
+          docker ps > artifacts/docker-ps.txt
+          docker compose logs --no-color > artifacts/docker-compose.log || true
+
+      # 5) Выгрузка артефактов
+      - name: Upload DAST artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-zap-results
+          path: |
+            zap-baseline-report.html
+            zap-baseline-report.json
+            artifacts/docker-ps.txt
+            artifacts/docker-compose.log
+
+      # 6) Остановка стенда
+      - name: Shutdown stack
+        if: always()
+        run: |
+          docker compose down -v || true
