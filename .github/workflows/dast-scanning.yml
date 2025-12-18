@@ -1,0 +1,334 @@
+name: DAST Security Scanning for Zabbix Docker
+
+on:
+  push:
+    branches: [ master, main ]
+    paths:
+      - 'docker-compose.yml'
+      - 'Dockerfile'
+      - '.github/workflows/dast-scanning.yml'
+  pull_request:
+    branches: [ master, main ]
+  schedule:
+    - cron: '0 2 * * 0'  # Еженедельно в воскресенье в 2:00
+  workflow_dispatch:  # Ручной запуск
+
+env:
+  ZABBIX_VERSION: '6.4'
+  DATABASE_TYPE: 'mysql'
+  SCAN_DURATION: '30'  # minutes
+
+jobs:
+  deploy-zabbix-stack:
+    name: Deploy Zabbix Docker Stack
+    runs-on: ubuntu-latest
+    outputs:
+      zabbix-url: ${{ steps.deployment.outputs.zabbix-url }}
+      zap-api-url: ${{ steps.deployment.outputs.zap-api-url }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: 'zabbix/zabbix-docker'
+          ref: 'latest'
+      
+      - name: Create docker-compose for testing
+        run: |
+          cat > docker-compose.test.yml << EOF
+          version: '3.5'
+          services:
+            zabbix-server:
+              image: zabbix/zabbix-server-mysql:${{ env.ZABBIX_VERSION }}-latest
+              ports:
+                - "10051:10051"
+              environment:
+                DB_SERVER_HOST: zabbix-mysql
+                MYSQL_USER: zabbix
+                MYSQL_PASSWORD: zabbix_password
+                MYSQL_DATABASE: zabbix
+              depends_on:
+                - zabbix-mysql
+                - zabbix-web
+            
+            zabbix-web:
+              image: zabbix/zabbix-web-nginx-mysql:${{ env.ZABBIX_VERSION }}-latest
+              ports:
+                - "8080:8080"
+              environment:
+                ZBX_SERVER_HOST: zabbix-server
+                DB_SERVER_HOST: zabbix-mysql
+                MYSQL_USER: zabbix
+                MYSQL_PASSWORD: zabbix_password
+                MYSQL_DATABASE: zabbix
+              depends_on:
+                - zabbix-mysql
+            
+            zabbix-mysql:
+              image: mysql:8.0
+              command: [ '--character-set-server=utf8mb4', '--collation-server=utf8mb4_bin' ]
+              environment:
+                MYSQL_DATABASE: zabbix
+                MYSQL_USER: zabbix
+                MYSQL_PASSWORD: zabbix_password
+                MYSQL_ROOT_PASSWORD: root_password
+              volumes:
+                - mysql-data:/var/lib/mysql
+            
+            zaproxy:
+              image: ghcr.io/zaproxy/zaproxy:stable
+              ports:
+                - "8090:8090"
+              command: [ "zap.sh", "-daemon", "-host", "0.0.0.0", "-port", "8090",
+                         "-config", "api.disablekey=true",
+                         "-config", "api.addrs.addr.name=.*",
+                         "-config", "api.addrs.addr.regex=true" ]
+          
+          volumes:
+            mysql-data:
+          EOF
+      
+      - name: Deploy Zabbix stack
+        id: deployment
+        run: |
+          # Запуск стека
+          docker-compose -f docker-compose.test.yml up -d
+          
+          # Ожидание готовности сервисов
+          echo "Waiting for Zabbix services to start..."
+          for i in {1..60}; do
+            if curl -s http://localhost:8080 > /dev/null; then
+              echo "Zabbix Web UI is accessible"
+              echo "zabbix-url=http://localhost:8080" >> $GITHUB_OUTPUT
+              echo "zap-api-url=http://localhost:8090" >> $GITHUB_OUTPUT
+              break
+            fi
+            sleep 5
+          done
+          
+          if [ $i -eq 60 ]; then
+            echo "Zabbix failed to start"
+            exit 1
+          fi
+      
+      - name: Initialize Zabbix with test data
+        run: |
+          # Создание тестовых данных для сканирования
+          echo "Initializing Zabbix with test configuration..."
+          # Здесь могут быть команды для настройки тестового окружения
+          sleep 30
+
+  dast-passive-scan:
+    name: Passive DAST Scan
+    runs-on: ubuntu-latest
+    needs: deploy-zabbix-stack
+    steps:
+      - name: Run OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.10.0
+        with:
+          target: ${{ needs.deploy-zabbix-stack.outputs.zabbix-url }}
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-a'
+      
+      - name: Upload passive scan results
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-passive-results
+          path: |
+            *.json
+            *.html
+            *.md
+
+  dast-active-scan:
+    name: Active DAST Scan
+    runs-on: ubuntu-latest
+    needs: deploy-zabbix-stack
+    steps:
+      - name: Run OWASP ZAP Full Scan
+        run: |
+          docker run --network host -v $(pwd):/zap/wrk \
+            -t ghcr.io/zaproxy/zaproxy:stable zap-full-scan.py \
+            -t ${{ needs.deploy-zabbix-stack.outputs.zabbix-url }} \
+            -g gen.conf -r zap-report.html \
+            -d -m ${{ env.SCAN_DURATION }}
+      
+      - name: Generate detailed report
+        run: |
+          docker run --network host -v $(pwd):/zap/wrk \
+            ghcr.io/zaproxy/zaproxy:stable zap-cli \
+            --zap-url ${{ needs.deploy-zabbix-stack.outputs.zap-api-url }} \
+            report -o /zap/wrk/detailed-report.html -f html
+      
+      - name: Upload active scan results
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-active-results
+          path: |
+            zap-report.html
+            detailed-report.html
+            *.xml
+
+  api-security-test:
+    name: Zabbix API Security Testing
+    runs-on: ubuntu-latest
+    needs: deploy-zabbix-stack
+    steps:
+      - name: Checkout API tests
+        run: |
+          git clone https://github.com/zabbix/zabbix --depth 1
+          cp -r zabbix/tests/api/* ./api-tests/
+      
+      - name: Install Newman for Postman
+        run: npm install -g newman newman-reporter-htmlextra
+      
+      - name: Run API security tests
+        run: |
+          cat > zabbix-api-tests.json << 'EOF'
+          {
+            "info": {
+              "name": "Zabbix API Security Tests",
+              "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+            },
+            "item": [
+              {
+                "name": "Authentication Tests",
+                "item": [
+                  {
+                    "name": "Test weak credentials",
+                    "request": {
+                      "method": "POST",
+                      "header": [],
+                      "body": {
+                        "mode": "raw",
+                        "raw": "{\"jsonrpc\":\"2.0\",\"method\":\"user.login\",\"params\":{\"user\":\"admin\",\"password\":\"admin\"},\"id\":1}"
+                      },
+                      "url": {
+                        "raw": "${{ needs.deploy-zabbix-stack.outputs.zabbix-url }}/api_jsonrpc.php",
+                        "protocol": "http",
+                        "host": ["localhost"],
+                        "port": "8080",
+                        "path": ["api_jsonrpc.php"]
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+          
+          newman run zabbix-api-tests.json \
+            --reporters cli,htmlextra \
+            --reporter-htmlextra-export api-report.html
+      
+      - name: Upload API test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-security-results
+          path: |
+            api-report.html
+            newman/*
+
+  container-security:
+    name: Docker Container Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Zabbix Docker
+        uses: actions/checkout@v4
+        with:
+          repository: 'zabbix/zabbix-docker'
+      
+      - name: Scan Docker images with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'zabbix/zabbix-server-mysql:latest'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+      
+      - name: Scan for secrets in Dockerfiles
+        run: |
+          docker run --rm -v $(pwd):/src ghcr.io/zricethezav/gitleaks:v8.15.0 detect \
+            --source="/src" --report-path="gitleaks-report.json"
+      
+      - name: Upload container security results
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-security-results
+          path: |
+            trivy-results.sarif
+            gitleaks-report.json
+
+  generate-dast-report:
+    name: Generate DAST Summary Report
+    runs-on: ubuntu-latest
+    needs: [dast-passive-scan, dast-active-scan, api-security-test, container-security]
+    if: always()
+    steps:
+      - name: Download all DAST results
+        uses: actions/download-artifact@v4
+      
+      - name: Create comprehensive report
+        run: |
+          # Создание сводного HTML-отчета
+          cat > dast-summary.html << 'EOF'
+          <html>
+          <head>
+            <title>DAST Scan Report - Zabbix Docker</title>
+            <style>
+              body { font-family: Arial, sans-serif; margin: 40px; }
+              .critical { color: #d00; font-weight: bold; }
+              .high { color: #f50; }
+              .medium { color: #fc0; }
+              .low { color: #369; }
+              .vuln-table { border-collapse: collapse; width: 100%; }
+              .vuln-table th, .vuln-table td { border: 1px solid #ddd; padding: 8px; }
+            </style>
+          </head>
+          <body>
+            <h1>DAST Security Scan Report</h1>
+            <p>Generated: $(date)</p>
+            <p>Target: Zabbix Docker Stack (${{ env.ZABBIX_VERSION }})</p>
+            
+            <h2>Executive Summary</h2>
+            <div id="summary-stats">
+              <!-- Статистика будет заполнена скриптом -->
+            </div>
+            
+            <h2>Vulnerability Breakdown</h2>
+            <table class="vuln-table">
+              <tr><th>Severity</th><th>Count</th><th>Category</th></tr>
+              <!-- Данные будут заполнены -->
+            </table>
+            
+            <h2>Recommendations</h2>
+            <ul>
+              <li>Review Docker image configurations</li>
+              <li>Implement Web Application Firewall</li>
+              <li>Regularly update Zabbix components</li>
+              <li>Monitor API endpoints for suspicious activity</li>
+            </ul>
+          </body>
+          </html>
+          EOF
+      
+      - name: Upload final DAST report
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-comprehensive-report
+          path: |
+            dast-summary.html
+            dast-passive-results/
+            dast-active-results/
+            api-security-results/
+            container-security-results/
+
+  cleanup:
+    name: Cleanup Docker Resources
+    runs-on: ubuntu-latest
+    needs: generate-dast-report
+    if: always()
+    steps:
+      - name: Stop and remove containers
+        run: |
+          docker-compose -f docker-compose.test.yml down -v
+          docker system prune -af
