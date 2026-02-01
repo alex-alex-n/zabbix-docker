@@ -1,177 +1,126 @@
 # Название рабочего процесса
-name: DAST - OWASP ZAP (Zabbix Docker)
+name: DAST - OWASP ZAP (Zabbix Docker) # Имя рабочего процесса GitHub Actions
 
 # Триггеры запуска
-on:
-  # Ручной запуск через интерфейс GitHub
-  workflow_dispatch:
-  # Запуск при создании пул-реквеста в указанные ветки
-  pull_request:
-    branches: [ master, main ]
-  # Запуск при пуше в указанные ветки
-  push:
-    branches: [ master, main, develop ]
-  # Запуск по расписанию: каждое воскресенье в 2:00
-  schedule:
-    - cron: "0 2 * * 0"
+on: # Секция определения событий запуска workflow
+  workflow_dispatch: # Ручной запуск через интерфейс GitHub Actions
+  pull_request: # Событие создания pull request
+    branches: [ master, main ] # Ветки, для которых срабатывает триггер
+  push: # Событие push в репозиторий
+    branches: [ master, main, develop ] # Ветки, для которых срабатывает триггер
+  schedule: # Запуск по расписанию (cron)
+    - cron: "0 2 * * 0" # Каждое воскресенье в 02:00 (GMT)
 
 # Права доступа для GitHub токена
-permissions:
-  contents: read
+permissions: # Настройка разрешений для GitHub токена
+  contents: read # Разрешение на чтение содержимого репозитория
 
-# Определение заданий
-jobs:
-  # Задание для динамического анализа безопасности (DAST)
-  dast-zap:
-    # Запуск на последней версии Ubuntu
-    runs-on: ubuntu-latest
-    # Таймаут выполнения задания (40 минут)
-    timeout-minutes: 40
+# Определение заданий (jobs)
+jobs: # Секция определения заданий
+  dast-zap: # Идентификатор задания для динамического анализа безопасности
+    runs-on: ubuntu-latest # Тип runner для выполнения задания
+    timeout-minutes: 40 # Максимальное время выполнения задания (40 минут)
 
-    # Шаги выполнения задания
-    steps:
-      # Шаг 1: Получение кода из репозитория
-      - name: Checkout
-        uses: actions/checkout@v4
+    steps: # Секция шагов выполнения задания
+      - name: Checkout # Имя шага: Получение кода репозитория
+        uses: actions/checkout@v4 # Действие для получения кода из репозитория
 
-      # Шаг 2: Выбор файла docker-compose
-      - name: Select compose file
-        # Идентификатор для использования в других шагах
-        id: compose
-        # Используем bash shell
-        shell: bash
-        # Команды для выполнения
-        run: |
-          # Выход при ошибке
-          set -e
-          # Проверяем наличие compose.yaml
-          if [ -f "compose.yaml" ]; then
-            # Сохраняем имя файла в переменную вывода
-            echo "file=compose.yaml" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Ищем файлы docker-compose_v3_*latest*.yaml
-          f=$(ls -1 docker-compose_v3_*latest*.yaml 2>/dev/null | head -n 1 || true)
-          # Если файл найден
-          if [ -n "$f" ]; then
-            # Сохраняем имя файла в переменную вывода
-            echo "file=$f" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Если файл не найден
-          echo "No compose file found"
-          # Показываем содержимое директории
-          ls -la
-          exit 1
+      - name: Select compose file # Имя шага: Выбор файла docker compose
+        id: compose # Идентификатор для использования вывода в других шагах
+        shell: bash # Использовать bash shell для выполнения команд
+        run: | # Многострочная команда bash
+          set -e # Включить режим немедленного выхода при ошибке
+          if [ -f "compose.yaml" ]; then # Проверка наличия файла compose.yaml
+            echo "file=compose.yaml" >> "$GITHUB_OUTPUT" # Сохранение имени файла в выходную переменную
+            exit 0 # Успешное завершение
+          fi # Конец условия
 
-      # Шаг 3: Запуск стека Zabbix
-      - name: Start Zabbix stack
-        shell: bash
-        run: |
-          # Проверяем версии Docker и Docker Compose
-          docker --version
-          docker compose version
-          # Запускаем контейнеры в фоновом режиме
-          docker compose -f "${{ steps.compose.outputs.file }}" up -d
-          # Показываем список запущенных контейнеров
-          docker ps
+          f=$(ls -1 docker-compose_v3_*latest*.yaml 2>/dev/null | head -n 1 || true) # Поиск файла docker-compose_v3_*latest*.yaml
+          if [ -n "$f" ]; then # Если файл найден
+            echo "file=$f" >> "$GITHUB_OUTPUT" # Сохранение имени файла в выходную переменную
+            exit 0 # Успешное завершение
+          fi # Конец условия
 
-      # Шаг 4: Ожидание доступности веб-интерфейса Zabbix
-      - name: Wait for Zabbix web UI
-        shell: bash
-        run: |
-          # Выход при ошибке
-          set -e
-          # URL для проверки
-          URL="http://localhost/"
-          # Цикл проверки (90 попыток * 5 секунд = 7.5 минут)
-          for i in {1..90}; do
-            # Получаем HTTP код ответа
-            code=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
-            # Если сервер отвечает 200 OK или 302 Found
-            if [ "$code" = "200" ] || [ "$code" = "302" ]; then
-              # Выводим сообщение об успехе
-              echo "Zabbix UI is up: $code"
-              exit 0
-            fi
-            # Ждем 5 секунд перед следующей попыткой
-            sleep 5
-          done
-          # Если сервер не стал доступен
-          echo "Zabbix UI did not become ready in time"
-          # Показываем информацию о контейнерах
-          docker ps
-          # Показываем логи последних 200 строк
-          docker compose -f "${{ steps.compose.outputs.file }}" logs --no-color | tail -200
-          exit 1
+          echo "No compose file found" # Сообщение об ошибке
+          ls -la # Вывод содержимого директории для отладки
+          exit 1 # Завершение с ошибкой
 
-      # Шаг 5: Подготовка директории для результатов
-      - name: Prepare output directory
-        shell: bash
-        run: |
-          # Создаем директорию zap
-          mkdir -p zap
-          # Даем права на запись всем пользователям
-          sudo chmod -R a+rwx zap
+      - name: Start Zabbix stack # Имя шага: Запуск стека Zabbix
+        shell: bash # Использовать bash shell
+        run: | # Многострочная команда bash
+          docker --version # Проверка версии Docker
+          docker compose version # Проверка версии Docker Compose
+          docker compose -f "${{ steps.compose.outputs.file }}" up -d # Запуск контейнеров в фоновом режиме
+          docker ps # Показать список запущенных контейнеров
 
-      # Шаг 6: Запуск OWASP ZAP baseline сканирования
-      - name: Run OWASP ZAP baseline (docker)
-        shell: bash
-        run: |
-          # Скачиваем образ ZAP
-          docker pull ghcr.io/zaproxy/zaproxy:stable -q
-          # Запускаем ZAP baseline сканирование
-          docker run --rm \
-            # Используем сеть хоста
-            --network=host \
-            # Монтируем директорию для отчетов
-            -v "${GITHUB_WORKSPACE}/zap:/zap/wrk:rw" \
-            -t ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py \
-              # Целевой URL
-              -t "http://localhost/" \
-              # JSON отчет
-              -J "report_json.json" \
-              # Markdown отчет
-              -w "report_md.md" \
-              # HTML отчет
-              -r "report_html.html" \
-              # Игнорировать предупреждения (не падать по ним)
-              -I
+      - name: Wait for Zabbix web UI # Имя шага: Ожидание доступности веб-интерфейса Zabbix
+        shell: bash # Использовать bash shell
+        run: | # Многострочная команда bash
+          set -e # Включить режим немедленного выхода при ошибке
+          URL="http://localhost/" # URL для проверки доступности
+          for i in {1..90}; do # Цикл на 90 попыток (90 * 5 секунд = 7.5 минут)
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true) # Получение HTTP кода ответа
+            if [ "$code" = "200" ] || [ "$code" = "302" ]; then # Если сервер отвечает 200 OK или 302 Found
+              echo "Zabbix UI is up: $code" # Сообщение об успешной проверке
+              exit 0 # Успешное завершение
+            fi # Конец условия
+            sleep 5 # Пауза 5 секунд между попытками
+          done # Конец цикла
+          echo "Zabbix UI did not become ready in time" # Сообщение об ошибке
+          docker ps # Показать список контейнеров для отладки
+          docker compose -f "${{ steps.compose.outputs.file }}" logs --no-color | tail -200 # Показать последние 200 строк логов
+          exit 1 # Завершение с ошибкой
 
-      # Шаг 7: Сбор логов Docker (всегда, даже при ошибках)
-      - name: Collect docker logs
-        # Выполнять всегда, даже если предыдущие шаги завершились с ошибкой
-        if: always()
-        shell: bash
-        run: |
-          # Создаем директорию для артефактов
-          mkdir -p artifacts
-          # Сохраняем список процессов Docker
-          docker ps > artifacts/docker-ps.txt
-          # Сохраняем логи Docker Compose
-          docker compose -f "${{ steps.compose.outputs.file }}" logs --no-color > artifacts/docker-compose.log || true
+      - name: Prepare output directory # Имя шага: Подготовка директории для результатов
+        shell: bash # Использовать bash shell
+        run: | # Многострочная команда bash
+          mkdir -p zap # Создание директории zap (если не существует)
+          # чтобы контейнер мог писать отчёты в смонтированный каталог
+          sudo chmod -R a+rwx zap # Выдача прав на запись всем пользователям
 
-      # Шаг 8: Загрузка артефактов
-      - name: Upload artifacts
-        if: always()
-        # Используем действие для загрузки артефактов
-        uses: actions/upload-artifact@v4
-        with:
-          # Имя артефакта
-          name: zap-scan-results
-          # Файлы для загрузки
-          path: |
-            zap/report_html.html
-            zap/report_json.json
-            zap/report_md.md
-            artifacts/docker-ps.txt
-            artifacts/docker-compose.log
+      - name: Run OWASP ZAP baseline (docker) # Имя шага: Запуск OWASP ZAP baseline сканирования
+        shell: bash # Использовать bash shell
+        run: | # Многострочная команда bash (bash shell script)
+          docker pull ghcr.io/zaproxy/zaproxy:stable -q # Загрузка образа ZAP из GitHub Container Registry
 
-      # Шаг 9: Остановка стека Zabbix
-      - name: Shutdown stack
-        if: always()
-        shell: bash
-        run: |
-          # Останавливаем и удаляем контейнеры с томами
-          docker compose -f "${{ steps.compose.outputs.file }}" down -v || true
+          # -J JSON, -w Markdown, -r HTML
+          docker run --rm \ # Запуск контейнера с автоматическим удалением после завершения
+            --network=host \ # Использование сети хоста для доступа к localhost
+            -v "${GITHUB_WORKSPACE}/zap:/zap/wrk:rw" \ # Монтирование директории для отчетов
+            -t ghcr.io/zaproxy/zaproxy:stable \ # Использование образа ZAP
+            zap-baseline.py \ # Запуск скрипта baseline сканирования
+              -t "http://localhost/" \ # Целевой URL для сканирования
+              -J "report_json.json" \ # Генерация отчета в формате JSON
+              -w "report_md.md" \ # Генерация отчета в формате Markdown
+              -r "report_html.html" \ # Генерация отчета в формате HTML
+              -I # Игнорировать предупреждения (не завершать с ошибкой при WARN)
+
+          # Примечание:
+          # -I = не падать по WARN (удобно для ВКР/первого прогона).
+          # Если хотите падать на WARN — уберите -I.
+
+      - name: Collect docker logs # Имя шага: Сбор логов Docker
+        if: always() # Выполнять всегда, даже если предыдущие шаги завершились с ошибкой
+        shell: bash # Использовать bash shell
+        run: | # Многострочная команда bash
+          mkdir -p artifacts # Создание директории для артефактов
+          docker ps > artifacts/docker-ps.txt # Сохранение списка контейнеров в файл
+          docker compose -f "${{ steps.compose.outputs.file }}" logs --no-color > artifacts/docker-compose.log || true # Сохранение логов Docker Compose
+
+      - name: Upload artifacts # Имя шага: Загрузка артефактов
+        if: always() # Выполнять всегда, даже если предыдущие шаги завершились с ошибкой
+        uses: actions/upload-artifact@v4 # Действие для загрузки артефактов
+        with: # Параметры действия
+          name: zap-scan-results # Имя артефакта
+          path: | # Список файлов для загрузки
+            zap/report_html.html # HTML отчет ZAP
+            zap/report_json.json # JSON отчет ZAP
+            zap/report_md.md # Markdown отчет ZAP
+            artifacts/docker-ps.txt # Файл со списком контейнеров
+            artifacts/docker-compose.log # Файл с логами Docker Compose
+
+      - name: Shutdown stack # Имя шага: Остановка стека Zabbix
+        if: always() # Выполнять всегда, даже если предыдущие шаги завершились с ошибкой
+        shell: bash # Использовать bash shell
+        run: | # Многострочная команда bash
+          docker compose -f "${{ steps.compose.outputs.file }}" down -v || true # Остановка и удаление контейнеров с томами
