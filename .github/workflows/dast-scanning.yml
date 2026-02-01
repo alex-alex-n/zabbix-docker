@@ -1,94 +1,85 @@
-# Название рабочего процесса
-name: DAST - OWASP ZAP (Zabbix Docker) # Имя рабочего процесса GitHub Actions
+name: DAST - OWASP ZAP (Zabbix Docker)
 
-# Триггеры запуска
-on: # Секция определения событий запуска workflow
-  workflow_dispatch: # Ручной запуск через интерфейс GitHub Actions
-  pull_request: # Событие создания pull request
-    branches: [ master, main ] # Ветки, для которых срабатывает триггер
-  push: # Событие push в репозиторий
-    branches: [ master, main, develop ] # Ветки, для которых срабатывает триггер
-  schedule: # Запуск по расписанию (cron)
-    - cron: "0 2 * * 0" # Каждое воскресенье в 02:00 (GMT)
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [ master, main ]
+  push:
+    branches: [ master, main, develop ]
+  schedule:
+    - cron: "0 2 * * 0"
 
-# Права доступа для GitHub токена
-permissions: # Настройка разрешений для GitHub токена
-  contents: read # Разрешение на чтение содержимого репозитория
+permissions:
+  contents: read
 
-# Определение заданий (jobs)
-jobs: # Секция определения заданий
-  dast-zap: # Идентификатор задания для динамического анализа безопасности
-    runs-on: ubuntu-latest # Тип runner для выполнения задания
-    timeout-minutes: 40 # Максимальное время выполнения задания (40 минут)
+jobs:
+  dast-zap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
 
-    steps: # Секция шагов выполнения задания
-      - name: Checkout # Имя шага: Получение кода репозитория
-        uses: actions/checkout@v4 # Действие для получения кода из репозитория
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Select compose file # Имя шага: Выбор файла docker compose
-        id: compose # Идентификатор для использования вывода в других шагах
-        shell: bash # Использовать bash shell для выполнения команд
-        run: | # Многострочная команда bash
-          set -e # Включить режим немедленного выхода при ошибке
-          if [ -f "compose.yaml" ]; then # Проверка наличия файла compose.yaml
-            echo "file=compose.yaml" >> "$GITHUB_OUTPUT" # Сохранение имени файла в выходную переменную
-            exit 0 # Успешное завершение
-          fi # Конец условия
+      - name: Select compose file
+        id: compose
+        shell: bash
+        run: |
+          set -e
+          if [ -f "compose.yaml" ]; then
+            echo "file=compose.yaml" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-          f=$(ls -1 docker-compose_v3_*latest*.yaml 2>/dev/null | head -n 1 || true) # Поиск файла docker-compose_v3_*latest*.yaml
-          if [ -n "$f" ]; then # Если файл найден
-            echo "file=$f" >> "$GITHUB_OUTPUT" # Сохранение имени файла в выходную переменную
-            exit 0 # Успешное завершение
-          fi # Конец условия
+          f=$(ls -1 docker-compose_v3_*latest*.yaml 2>/dev/null | head -n 1 || true)
+          if [ -n "$f" ]; then
+            echo "file=$f" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-          echo "No compose file found" # Сообщение об ошибке
-          ls -la # Вывод содержимого директории для отладки
-          exit 1 # Завершение с ошибкой
+          echo "No compose file found"
+          ls -la
+          exit 1
 
-      - name: Start Zabbix stack # Имя шага: Запуск стека Zabbix
-        shell: bash # Использовать bash shell
-        run: | # Многострочная команда bash
-          docker --version # Проверка версии Docker
-          docker compose version # Проверка версии Docker Compose
-          docker compose -f "${{ steps.compose.outputs.file }}" up -d # Запуск контейнеров в фоновом режиме
-          docker ps # Показать список запущенных контейнеров
+      - name: Start Zabbix stack
+        shell: bash
+        run: |
+          docker --version
+          docker compose version
+          docker compose -f "${{ steps.compose.outputs.file }}" up -d
+          docker ps
 
-      - name: Wait for Zabbix web UI # Имя шага: Ожидание доступности веб-интерфейса Zabbix
-        shell: bash # Использовать bash shell
-        run: | # Многострочная команда bash
-          set -e # Включить режим немедленного выхода при ошибке
-          URL="http://localhost/" # URL для проверки доступности
-          for i in {1..90}; do # Цикл на 90 попыток (90 * 5 секунд = 7.5 минут)
-            code=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true) # Получение HTTP кода ответа
-            if [ "$code" = "200" ] || [ "$code" = "302" ]; then # Если сервер отвечает 200 OK или 302 Found
-              echo "Zabbix UI is up: $code" # Сообщение об успешной проверке
-              exit 0 # Успешное завершение
-            fi # Конец условия
-            sleep 5 # Пауза 5 секунд между попытками
-          done # Конец цикла
-          echo "Zabbix UI did not become ready in time" # Сообщение об ошибке
-          docker ps # Показать список контейнеров для отладки
-          docker compose -f "${{ steps.compose.outputs.file }}" logs --no-color | tail -200 # Показать последние 200 строк логов
-          exit 1 # Завершение с ошибкой
+      - name: Wait for Zabbix web UI
+        shell: bash
+        run: |
+          set -e
+          URL="http://localhost/"
+          for i in {1..90}; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
+            if [ "$code" = "200" ] || [ "$code" = "302" ]; then
+              echo "Zabbix UI is up: $code"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Zabbix UI did not become ready in time"
+          docker ps
+          docker compose -f "${{ steps.compose.outputs.file }}" logs --no-color | tail -200
+          exit 1
 
-      - name: Prepare output directory # Имя шага: Подготовка директории для результатов
-        shell: bash # Использовать bash shell
-        run: | # Многострочная команда bash
-          mkdir -p zap # Создание директории zap (если не существует)
+      - name: Prepare output directory
+        shell: bash
+        run: |
+          mkdir -p zap
           # чтобы контейнер мог писать отчёты в смонтированный каталог
-          sudo chmod -R a+rwx zap # Выдача прав на запись всем пользователям
+          sudo chmod -R a+rwx zap
 
       - name: Run OWASP ZAP baseline (docker)
         shell: bash
         run: |
-          # Загрузка образа ZAP из GitHub Container Registry
           docker pull ghcr.io/zaproxy/zaproxy:stable -q
-          
-          # Запуск ZAP baseline сканирования
-          # Параметры: --rm (удалить после завершения), --network=host (сеть хоста), 
-          # -v (монтирование директории), -t (псевдо-TTY)
-          # zap-baseline.py -t "http://localhost/" (целевой URL)
-          # -J (JSON отчет), -w (Markdown отчет), -r (HTML отчет), -I (игнорировать WARN)
+
+          # -J JSON, -w Markdown, -r HTML
           docker run --rm \
             --network=host \
             -v "${GITHUB_WORKSPACE}/zap:/zap/wrk:rw" \
@@ -100,28 +91,32 @@ jobs: # Секция определения заданий
               -r "report_html.html" \
               -I
 
-      - name: Collect docker logs # Имя шага: Сбор логов Docker
-        if: always() # Выполнять всегда, даже если предыдущие шаги завершились с ошибкой
-        shell: bash # Использовать bash shell
-        run: | # Многострочная команда bash
-          mkdir -p artifacts # Создание директории для артефактов
-          docker ps > artifacts/docker-ps.txt # Сохранение списка контейнеров в файл
-          docker compose -f "${{ steps.compose.outputs.file }}" logs --no-color > artifacts/docker-compose.log || true # Сохранение логов Docker Compose
+          # Примечание:
+          # -I = не падать по WARN (удобно для ВКР/первого прогона).
+          # Если хотите падать на WARN — уберите -I.
 
-      - name: Upload artifacts # Имя шага: Загрузка артефактов
-        if: always() # Выполнять всегда, даже если предыдущие шаги завершились с ошибкой
-        uses: actions/upload-artifact@v4 # Действие для загрузки артефактов
-        with: # Параметры действия
-          name: zap-scan-results # Имя артефакта
-          path: | # Список файлов для загрузки
-            zap/report_html.html # HTML отчет ZAP
-            zap/report_json.json # JSON отчет ZAP
-            zap/report_md.md # Markdown отчет ZAP
-            artifacts/docker-ps.txt # Файл со списком контейнеров
-            artifacts/docker-compose.log # Файл с логами Docker Compose
+      - name: Collect docker logs
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          docker ps > artifacts/docker-ps.txt
+          docker compose -f "${{ steps.compose.outputs.file }}" logs --no-color > artifacts/docker-compose.log || true
 
-      - name: Shutdown stack # Имя шага: Остановка стека Zabbix
-        if: always() # Выполнять всегда, даже если предыдущие шаги завершились с ошибкой
-        shell: bash # Использовать bash shell
-        run: | # Многострочная команда bash
-          docker compose -f "${{ steps.compose.outputs.file }}" down -v || true # Остановка и удаление контейнеров с томами
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-scan-results
+          path: |
+            zap/report_html.html
+            zap/report_json.json
+            zap/report_md.md
+            artifacts/docker-ps.txt
+            artifacts/docker-compose.log
+
+      - name: Shutdown stack
+        if: always()
+        shell: bash
+        run: |
+          docker compose -f "${{ steps.compose.outputs.file }}" down -v || true
