@@ -78,26 +78,27 @@ jobs: # Секция определения заданий
           # чтобы контейнер мог писать отчёты в смонтированный каталог
           sudo chmod -R a+rwx zap # Выдача прав на запись всем пользователям
 
-      - name: Run OWASP ZAP baseline (docker) # Имя шага: Запуск OWASP ZAP baseline сканирования
-        shell: bash # Использовать bash shell
-        run: | # Многострочная команда bash (bash shell script)
-          docker pull ghcr.io/zaproxy/zaproxy:stable -q # Загрузка образа ZAP из GitHub Container Registry
-
-          # -J JSON, -w Markdown, -r HTML
-          docker run --rm \ # Запуск контейнера с автоматическим удалением после завершения
-            --network=host \ # Использование сети хоста для доступа к localhost
-            -v "${GITHUB_WORKSPACE}/zap:/zap/wrk:rw" \ # Монтирование директории для отчетов
-            -t ghcr.io/zaproxy/zaproxy:stable \ # Использование образа ZAP
-            zap-baseline.py \ # Запуск скрипта baseline сканирования
-              -t "http://localhost/" \ # Целевой URL для сканирования
-              -J "report_json.json" \ # Генерация отчета в формате JSON
-              -w "report_md.md" \ # Генерация отчета в формате Markdown
-              -r "report_html.html" \ # Генерация отчета в формате HTML
-              -I # Игнорировать предупреждения (не завершать с ошибкой при WARN)
-
-          # Примечание:
-          # -I = не падать по WARN (удобно для ВКР/первого прогона).
-          # Если хотите падать на WARN — уберите -I.
+      - name: Run OWASP ZAP baseline (docker)
+        shell: bash
+        run: |
+          # Загрузка образа ZAP из GitHub Container Registry
+          docker pull ghcr.io/zaproxy/zaproxy:stable -q
+          
+          # Запуск ZAP baseline сканирования
+          # Параметры: --rm (удалить после завершения), --network=host (сеть хоста), 
+          # -v (монтирование директории), -t (псевдо-TTY)
+          # zap-baseline.py -t "http://localhost/" (целевой URL)
+          # -J (JSON отчет), -w (Markdown отчет), -r (HTML отчет), -I (игнорировать WARN)
+          docker run --rm \
+            --network=host \
+            -v "${GITHUB_WORKSPACE}/zap:/zap/wrk:rw" \
+            -t ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+              -t "http://localhost/" \
+              -J "report_json.json" \
+              -w "report_md.md" \
+              -r "report_html.html" \
+              -I
 
       - name: Collect docker logs # Имя шага: Сбор логов Docker
         if: always() # Выполнять всегда, даже если предыдущие шаги завершились с ошибкой
